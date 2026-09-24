@@ -1,9 +1,9 @@
 """Persistence operations for Agent Relay.
 
 Routes and the worker call these functions instead of issuing SQL directly.
-Claim, heartbeat, terminal submission, and recovery each use the same atomic
-SQLite transaction seam, which is the one area students will later replace by
-PostgreSQL row-locking operations.
+Concurrent claims, heartbeats, terminal submissions, and recovery each run in
+a PostgreSQL transaction and coordinate with row locks (``FOR UPDATE`` /
+``FOR UPDATE SKIP LOCKED``) so every task has one active lease at a time.
 """
 
 from __future__ import annotations
@@ -74,9 +74,7 @@ def register_agent(name: str, description: str | None) -> dict[str, str]:
 
 def authenticate(token: str) -> Agent:
     token_digest = secret_hash(token)
-    # last_seen_at is an authenticated observation and therefore a write.  Use
-    # the same writer boundary as task operations so concurrent workers do not
-    # hold stale WAL snapshots while trying to update it.
+    # last_seen_at is an authenticated observation and therefore a write.
     with immediate_transaction() as db:
         agent = db.scalar(select(Agent).where(Agent.token_hash == token_digest))
         if agent is None or not hmac.compare_digest(agent.token_hash, token_digest):
@@ -104,9 +102,13 @@ def list_agents(limit: int, cursor: tuple[datetime, str] | None) -> tuple[list[A
 
 
 def create_task(sender_id: str, recipient_id: str, input_text: str, idempotency_key: str | None) -> dict[str, str]:
-    # Serializing task creation makes the sender-scoped idempotency check and
-    # unique constraint one operation even when two API processes race.
+    # Locking the sender's row serializes that sender's idempotency check and
+    # insert, so two API processes racing with the same key cannot both pass
+    # the pre-check.  The unique constraint remains as the backstop.
     with immediate_transaction() as db:
+        sender = db.scalar(select(Agent).where(Agent.id == sender_id).with_for_update())
+        if sender is None:
+            raise RelayError("unauthorized", "The authenticated agent does not exist.", 401)
         recipient = db.get(Agent, recipient_id)
         if recipient is None:
             raise RelayError("not_found", "Recipient agent not found.", 404)
@@ -149,6 +151,7 @@ def claim_one(agent_id: str, worker_id: str | None) -> dict[str, Any] | None:
             .where(Task.recipient_id == agent_id, Task.status == "queued")
             .order_by(Task.created_at, Task.id)
             .limit(1)
+            .with_for_update(skip_locked=True)
         )
         if task is None:
             return None
@@ -188,8 +191,13 @@ def claim_one(agent_id: str, worker_id: str | None) -> dict[str, Any] | None:
 
 
 def _find_attempt_for_token(db: Session, task_id: str, token: str) -> Attempt | None:
+    # Locking the attempt row serializes heartbeat/terminal submission against
+    # lease recovery: whichever gets the lock first defines the outcome, and
+    # the loser re-reads the committed state on commit.
     return db.scalar(
-        select(Attempt).where(Attempt.task_id == task_id, Attempt.claim_token_hash == secret_hash(token))
+        select(Attempt)
+        .where(Attempt.task_id == task_id, Attempt.claim_token_hash == secret_hash(token))
+        .with_for_update()
     )
 
 

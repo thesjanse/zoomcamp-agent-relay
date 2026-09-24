@@ -1,22 +1,42 @@
-# Agent Relay (SQLite starter)
+# Agent Relay (PostgreSQL)
 
 Agent Relay is a small FastAPI service for registering agents, delivering one
-task at a time, and recording results. The local starter is self-contained:
-SQLite persists the queue and attempts, while workers execute tasks on their own
-machines. The included worker deterministically returns `input.upper()`.
+task at a time, and recording results. PostgreSQL persists the queue and
+attempts, while workers execute tasks on their own machines. The included
+worker deterministically returns `input.upper()`.
 
-## Run it
+## Run it with Docker Compose
+
+The included `compose.yaml` runs the relay (built from the `Dockerfile`) and a
+`postgres` service together, with the API waiting for the database to become
+healthy:
 
 ```bash
+docker compose up -d --build
+```
+
+Open <http://127.0.0.1:8000/> for the token-based local dashboard. `GET
+/health` is a liveness check and `GET /ready` verifies PostgreSQL connectivity
+and that the real tables exist. Let compose use a fresh checkout with:
+
+```bash
+docker compose down -v   # removes the postgres-data volume
+```
+
+## Run it locally (without Docker)
+
+Start PostgreSQL with the defaults Compose uses, or point
+`RELAY_DATABASE_URL` at any PostgreSQL instance:
+
+```bash
+docker compose up -d postgres
 uv sync
 uv run uvicorn main:app --reload
 ```
 
-Open <http://127.0.0.1:8000/> for the token-based local dashboard. The default
-database is `./agent-relay.db`; set `RELAY_DATABASE_URL` to use another SQLite
-file. `GET /health` is a liveness check and `GET /ready` verifies database
-connectivity and schema (it queries the real tables, so a wiped volume
-reports not-ready instead of passing with zero tables).
+The default database URL is
+`postgresql+psycopg://relay:relay@127.0.0.1:5432/agent_relay`; set
+`RELAY_DATABASE_URL` to override it.
 
 Register two identities and send a task:
 
@@ -67,13 +87,13 @@ uv run python main.py worker --agent-id agent_123 --token agt_… --worker-id la
 
 ## Storage and delivery behavior
 
-`database.py` contains SQLAlchemy models, SQLite WAL setup, and the isolated
-`BEGIN IMMEDIATE` transaction helper. `storage.py` contains task/claim/recovery
-operations; routes and request models are kept in `main.py` and `schemas.py`.
-SQLite does not provide PostgreSQL's `FOR UPDATE SKIP LOCKED`, so the starter
-serializes writer transactions to make concurrent claims safe across processes.
-Students can port this storage seam to PostgreSQL later without changing the
-HTTP protocol or lifecycle in `SPEC.md`.
+`database.py` contains the SQLAlchemy models and the PostgreSQL engine.
+`storage.py` contains task/claim/recovery operations; routes and request models
+are kept in `main.py` and `schemas.py`. Concurrent claims are coordinated with
+`SELECT ... FOR UPDATE SKIP LOCKED` so several API processes can claim from one
+inbox without locking each other out; heartbeats, terminal submissions, and
+lease recovery lock the affected attempt row with `FOR UPDATE` so a race has
+one consistent outcome.
 
 Claims are at-least-once and leased for 60 seconds by default. Heartbeats extend
 an active lease. A completion or failure must include the recipient's bearer
@@ -88,15 +108,13 @@ lease expiry before and after recovery, pagination/error shape, and dashboard
 asset serving:
 
 ```bash
+docker compose up -d postgres   # start the database the tests run against
 uv run pytest -q
 ```
 
-Tests default to a scratch database at `/tmp/agent-relay-test.db` so they
-don't reset your dev server's `./agent-relay.db`. The fixture drops and
-recreates all tables on whatever `RELAY_DATABASE_URL` points at, so stop
-the dev server first or set `RELAY_DATABASE_URL` to a scratch file before
-running tests against another database.
-
-This starter intentionally does not include Docker, Kubernetes, CI, external
-brokers, an LLM, or a PostgreSQL implementation. Those are deployment and
-student-port concerns rather than part of the local relay protocol.
+Tests default to a scratch database `agent_relay_test` in the compose Postgres
+instance (created automatically if missing), so they do not reset your dev
+server's data. The fixture drops and recreates all tables on whatever
+`RELAY_DATABASE_URL` points at, so stop the dev server first or set
+`RELAY_DATABASE_URL` to a scratch database before running tests against another
+PostgreSQL instance.

@@ -1,0 +1,62 @@
+apiVersion: v1
+kind: Service
+metadata:
+  name: agent-relay
+  labels:
+    app: agent-relay
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      nodePort: 31800
+  selector:
+    app: agent-relay
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: agent-relay
+  labels:
+    app: agent-relay
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: agent-relay
+  template:
+    metadata:
+      labels:
+        app: agent-relay
+    spec:
+      containers:
+        - name: agent-relay
+          image: agent-relay:local
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: RELAY_DATABASE_URL
+              value: postgresql+psycopg://relay:relay@postgres:5432/agent_relay
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+          readinessProbe:
+            httpGet:
+              path: /ready
+              port: 8000
+            initialDelaySeconds: 3
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            timeoutSeconds: 3
+            failureThreshold: 3

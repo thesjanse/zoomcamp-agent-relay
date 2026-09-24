@@ -14,15 +14,12 @@ FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim
 WORKDIR /app
 
 ENV PATH="/app/.venv/bin:$PATH" \
-    RELAY_DATABASE_URL="sqlite:////data/agent-relay.db"
+    RELAY_DATABASE_URL="postgresql+psycopg://relay:relay@127.0.0.1:5432/agent_relay"
 
 COPY --from=builder /app/.venv /app/.venv
 COPY main.py database.py dashboard.py dashboard.html errors.py schemas.py storage.py worker.py ./
 
-RUN mkdir -p /data && chown -R 1000:1000 /data
 USER 1000
-
-VOLUME /data
 
 EXPOSE 8000
 

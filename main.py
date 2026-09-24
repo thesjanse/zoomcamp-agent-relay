@@ -1,6 +1,6 @@
 """FastAPI routes for Agent Relay.
 
-Persistence and SQLite transaction details live in :mod:`database` and
+Persistence and PostgreSQL transaction details live in :mod:`database` and
 :mod:`storage`; the deterministic local worker is in :mod:`worker`.
 """
 
@@ -209,9 +209,12 @@ async def tasks_create(
         try:
             result = create_task(current.id, body.to, body.input, idempotency_key)
             return JSONResponse(status_code=201, content=result)
-        except OperationalError as exc:
-            if retry == 2 or "locked" not in str(exc).lower():
-                raise
+        except OperationalError:
+            # Transient PostgreSQL failures (connection drops during a
+            # restart, occasional deadlocks).  A failed INSERT leaves no task
+            # behind, so retrying cannot duplicate the idempotent submission.
+            if retry == 2:
+                raise RelayError("storage_error", "The task could not be persisted.", 503)
             await asyncio.sleep(0.05 * (retry + 1))
     raise RelayError("storage_error", "The task could not be persisted.", 503)
 
@@ -225,9 +228,9 @@ async def claim(
     while True:
         try:
             result = await asyncio.to_thread(claim_one, current.id, body.worker_id)
-        except OperationalError as exc:
-            if "locked" not in str(exc).lower():
-                raise
+        except OperationalError:
+            # Row locks resolve claim races without errors; a connection-level
+            # failure just means no claim this pass, so keep polling.
             result = None
         if result is not None:
             return JSONResponse(status_code=200, content=result)
